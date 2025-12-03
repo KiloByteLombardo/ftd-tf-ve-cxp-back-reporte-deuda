@@ -737,6 +737,228 @@ def agregar_monto_real_deuda(df: pd.DataFrame) -> pd.DataFrame:
     return df_con_monto_real
 
 
+def preparar_dataframe_bigquery(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prepara el DataFrame para BigQuery mapeando columnas y agregando timestamp.
+    
+    Args:
+        df: DataFrame con todas las columnas procesadas
+        
+    Returns:
+        DataFrame preparado para BigQuery con nombres de columnas mapeados
+    """
+    print("Preparando DataFrame para BigQuery...")
+    
+    # Mapeo de columnas del DataFrame a nombres de BigQuery
+    mapeo_columnas = {
+        'NUMERO_OC': 'vzla_deuda_orden_compra',
+        'PROVEEDOR': 'vzla_deuda_proveedor',
+        'SUCURSAL': 'vzla_deuda_sucursal',
+        'DIVISA': 'vzla_deuda_divisa',
+        'PRICE_OVERRIDE': 'vzla_deuda_price_override',
+        'IMPORTE': 'vzla_deuda_importe',
+        'IMPORTE_RECIBIDO': 'vzla_deuda_importe_recibido',
+        'IMPORTE_ASOCIADO': 'vzla_deuda_importe_asociado',
+        'FECHA_ORDEN': 'vzla_deuda_fecha_orden',
+        'UNIDAD_MEDIDA': 'vzla_deuda_unidad_medida',
+        'DESCRIPCION': 'vzla_deuda_descripcion',
+        'CUENTA_CARGO': 'vzla_deuda_cuenta_cargo',
+        'SOLICITANTE': 'vzla_deuda_solicitante',
+        'ESTADO_CIERRE': 'vzla_deuda_estado_cierre',
+        'APROBADOR': 'vzla_deuda_aprobador',
+        'FECHA_CIERRE': 'vzla_deuda_fecha_cierre',
+        'AÑO FISCAL': 'vzla_deuda_fiscal_year',
+        'TASA': 'vzla_deuda_tasa',
+        'AREA': 'vzla_deuda_area',
+        'MONTO OC': 'vzla_deuda_monto_oc',
+        'MONTO OC USD': 'vzla_deuda_monto_oc_usd',
+        'MONTO OC ASOCIADO': 'vzla_deuda_monto_oc_asociado',
+        'MONTO OC ASOCIADO USD': 'vzla_deuda_monto_oc_asociado_usd',
+        'MONTO REAL DEUDA': 'vzla_deuda_monto_real_deuda'
+    }
+    
+    # Columnas que deben ser STRING en BigQuery
+    columnas_string = [
+        'vzla_deuda_orden_compra',
+        'vzla_deuda_proveedor',
+        'vzla_deuda_sucursal',
+        'vzla_deuda_divisa',
+        'vzla_deuda_unidad_medida',
+        'vzla_deuda_descripcion',
+        'vzla_deuda_cuenta_cargo',
+        'vzla_deuda_solicitante',
+        'vzla_deuda_estado_cierre',
+        'vzla_deuda_aprobador',
+        'vzla_deuda_fiscal_year',
+        'vzla_deuda_area'
+    ]
+    
+    df_bq = df.copy()
+    
+    # Renombrar columnas según el mapeo
+    df_bq = df_bq.rename(columns=mapeo_columnas)
+    
+    # Agregar timestamp
+    timestamp_actual = datetime.now()
+    df_bq['vzla_deuda_timestamp'] = timestamp_actual
+    
+    # Seleccionar solo las columnas que existen en el DataFrame
+    columnas_finales = [col for col in mapeo_columnas.values() if col in df_bq.columns]
+    columnas_finales.append('vzla_deuda_timestamp')
+    
+    df_bq = df_bq[columnas_finales]
+    
+    # Convertir columnas STRING a string explícitamente (para evitar errores con int64)
+    for col in columnas_string:
+        if col in df_bq.columns:
+            # Convertir a string, manejando valores nulos
+            df_bq[col] = df_bq[col].astype(str).replace('nan', None).replace('None', None)
+            # Si el valor es 'None' o 'nan', dejarlo como None
+            df_bq[col] = df_bq[col].apply(lambda x: None if pd.isna(x) or str(x).lower() in ['none', 'nan', ''] else str(x))
+    
+    print(f"✓ DataFrame preparado para BigQuery. Columnas: {len(columnas_finales)}")
+    return df_bq
+
+
+def subir_a_bigquery(df: pd.DataFrame, project_id: str, dataset_id: str, table_id: str) -> bool:
+    """
+    Sube el DataFrame a BigQuery.
+    
+    Args:
+        df: DataFrame preparado para BigQuery
+        project_id: ID del proyecto de GCP
+        dataset_id: ID del dataset de BigQuery
+        table_id: ID de la tabla de BigQuery
+        
+    Returns:
+        True si se subió exitosamente, False en caso contrario
+    """
+    print(f"Subiendo datos a BigQuery: {project_id}.{dataset_id}.{table_id}")
+    
+    try:
+        from google.cloud import bigquery
+        
+        client = bigquery.Client(project=project_id)
+        table_ref = client.dataset(dataset_id).table(table_id)
+        
+        # Convertir fechas a formato correcto
+        df_upload = df.copy()
+        
+        # Imprimir tipos de datos antes de la conversión
+        print("  Tipos de datos del DataFrame antes de conversión:")
+        for col in df_upload.columns:
+            print(f"    {col}: {df_upload[col].dtype}")
+        
+        # Convertir columnas de fecha a datetime si es necesario
+        fecha_columns = ['vzla_deuda_fecha_orden', 'vzla_deuda_fecha_cierre']
+        for col in fecha_columns:
+            if col in df_upload.columns:
+                df_upload[col] = pd.to_datetime(df_upload[col], errors='coerce')
+        
+        # Asegurar que timestamp sea datetime
+        if 'vzla_deuda_timestamp' in df_upload.columns:
+            df_upload['vzla_deuda_timestamp'] = pd.to_datetime(df_upload['vzla_deuda_timestamp'])
+        
+        # Asegurar que todas las columnas STRING sean realmente string
+        columnas_string = [
+            'vzla_deuda_orden_compra', 'vzla_deuda_proveedor', 'vzla_deuda_sucursal',
+            'vzla_deuda_divisa', 'vzla_deuda_unidad_medida', 'vzla_deuda_descripcion',
+            'vzla_deuda_cuenta_cargo', 'vzla_deuda_solicitante', 'vzla_deuda_estado_cierre',
+            'vzla_deuda_aprobador', 'vzla_deuda_fiscal_year', 'vzla_deuda_area'
+        ]
+        
+        for col in columnas_string:
+            if col in df_upload.columns:
+                # Convertir a string, manejando valores nulos
+                # Primero convertir a string, luego reemplazar 'nan' y 'None' con None
+                df_upload[col] = df_upload[col].astype(str)
+                df_upload[col] = df_upload[col].replace(['nan', 'None', '<NA>', 'NaT'], None)
+                # Si el valor es None o NaN, dejarlo como None
+                df_upload[col] = df_upload[col].apply(lambda x: None if pd.isna(x) or str(x).lower() in ['none', 'nan', '', '<na>', 'nat'] else str(x))
+        
+        # Imprimir tipos de datos después de la conversión
+        print("  Tipos de datos del DataFrame después de conversión:")
+        for col in df_upload.columns:
+            print(f"    {col}: {df_upload[col].dtype}")
+        
+        # Configuración del job - usar WRITE_APPEND para agregar datos
+        job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_APPEND",
+        )
+        
+        # Cargar DataFrame directamente a BigQuery
+        job = client.load_table_from_dataframe(df_upload, table_ref, job_config=job_config)
+        job.result()  # Esperar a que termine el job
+        
+        print(f"✓ Datos subidos a BigQuery exitosamente. Filas: {len(df_upload)}")
+        return True
+        
+    except Exception as e:
+        print(f"✗ Error al subir a BigQuery: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def subir_excel_a_cloud_storage(ruta_archivo: str, bucket_name: str, nombre_archivo: Optional[str] = None) -> Optional[str]:
+    """
+    Sube el archivo Excel a Cloud Storage y retorna la URL pública.
+    
+    Args:
+        ruta_archivo: Ruta local al archivo Excel
+        bucket_name: Nombre del bucket de Cloud Storage
+        nombre_archivo: Nombre del archivo en Cloud Storage (opcional)
+        
+    Returns:
+        URL pública del archivo en Cloud Storage, o None si hay error
+    """
+    print(f"Subiendo archivo a Cloud Storage: {bucket_name}")
+    
+    try:
+        from google.cloud import storage
+        
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        
+        # Generar nombre del archivo si no se proporciona
+        if not nombre_archivo:
+            nombre_archivo = os.path.basename(ruta_archivo)
+        
+        # Subir el archivo
+        blob = bucket.blob(nombre_archivo)
+        blob.upload_from_filename(ruta_archivo)
+        
+        print(f"  Archivo subido como: {nombre_archivo}")
+        
+        # Hacer el archivo público y obtener la URL
+        try:
+            blob.make_public()
+            url_publica = blob.public_url
+            print(f"  URL obtenida de blob.public_url: {url_publica}")
+        except Exception as e:
+            print(f"  ⚠ Error al hacer público el blob: {e}")
+            url_publica = None
+        
+        # Verificar que la URL se generó correctamente
+        if not url_publica or url_publica == '' or url_publica is None:
+            # Si public_url no funciona, construir la URL manualmente
+            url_publica = f"https://storage.googleapis.com/{bucket_name}/{nombre_archivo}"
+            print(f"  URL construida manualmente: {url_publica}")
+        
+        print(f"✓ Archivo subido a Cloud Storage exitosamente")
+        print(f"  URL pública final: {url_publica}")
+        print(f"  Bucket: {bucket_name}")
+        print(f"  Blob: {nombre_archivo}")
+        
+        return url_publica
+        
+    except Exception as e:
+        print(f"✗ Error al subir a Cloud Storage: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def leer_areas_desde_sheets(spreadsheet_id: str, credentials_path: Optional[str] = None) -> Dict[str, str]:
     """
     Lee la tabla de SOLICITANTE y AREA desde Google Sheets.

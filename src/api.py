@@ -254,6 +254,8 @@ def generar_deuda():
         
         # Procesar archivos
         print("Iniciando procesamiento de archivos...")
+        from src.venezuela import procesar_archivos, preparar_dataframe_bigquery, subir_a_bigquery, subir_excel_a_cloud_storage
+        
         df_ordenes, df_tasa = procesar_archivos(ruta_ordenes, ruta_tasa, ruta_salida)
         
         print(f"✓ Procesamiento completado. Filas procesadas: {len(df_ordenes)}")
@@ -266,14 +268,52 @@ def generar_deuda():
                 'message': 'Error al generar el archivo de salida'
             }), 500
         
-        # Enviar el archivo como respuesta
-        print(f"Enviando archivo: {nombre_archivo_salida}")
-        return send_file(
-            ruta_salida,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=nombre_archivo_salida
-        )
+        # Preparar DataFrame para BigQuery
+        df_bq = preparar_dataframe_bigquery(df_ordenes)
+        
+        # Subir a BigQuery
+        project_id = os.getenv('GCP_PROJECT_ID')
+        dataset_id = os.getenv('BQ_DATASET_ID', 'deuda_vzla')
+        table_id = os.getenv('BQ_TABLE_ID', 'ordenes_compra')
+        
+        if project_id:
+            print(f"Subiendo a BigQuery: {project_id}.{dataset_id}.{table_id}")
+            subir_a_bigquery(df_bq, project_id, dataset_id, table_id)
+        else:
+            print("⚠ GCP_PROJECT_ID no configurado, omitiendo subida a BigQuery")
+        
+        # Subir Excel a Cloud Storage
+        bucket_name = os.getenv('GCS_BUCKET_NAME')
+        url_cloud_storage = None
+        
+        if bucket_name:
+            print(f"Subiendo Excel a Cloud Storage: {bucket_name}")
+            url_cloud_storage = subir_excel_a_cloud_storage(ruta_salida, bucket_name, nombre_archivo_salida)
+            if url_cloud_storage:
+                print(f"✓ URL de Cloud Storage obtenida: {url_cloud_storage}")
+            else:
+                print("⚠ No se pudo obtener la URL de Cloud Storage")
+        else:
+            print("⚠ GCS_BUCKET_NAME no configurado, omitiendo subida a Cloud Storage")
+        
+        # Preparar respuesta JSON
+        respuesta = {
+            'status': 'success',
+            'message': 'Archivo procesado exitosamente',
+            'filas_procesadas': len(df_ordenes),
+            'archivo': nombre_archivo_salida
+        }
+        
+        # Siempre incluir la URL de Cloud Storage si está disponible
+        if url_cloud_storage:
+            respuesta['url_cloud_storage'] = url_cloud_storage
+            respuesta['blob_url'] = url_cloud_storage  # Alias para mayor claridad
+        else:
+            respuesta['url_cloud_storage'] = None
+            print("⚠ Advertencia: No se pudo obtener la URL de Cloud Storage para incluir en la respuesta")
+        
+        print(f"Respuesta JSON preparada: {respuesta}")
+        return jsonify(respuesta), 200
         
     except Exception as e:
         print(f"✗ Error al procesar archivos: {e}")
