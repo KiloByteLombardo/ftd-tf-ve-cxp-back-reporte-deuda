@@ -267,7 +267,9 @@ def leer_tasa(ruta_archivo: str) -> pd.DataFrame:
 
 def agregar_columna_tasa(df_ordenes: pd.DataFrame, df_tasa: pd.DataFrame) -> pd.DataFrame:
     """
-    Agrega la columna TASA al DataFrame de ordenes usando un VLOOKUP basado en FECHA_ORDEN.
+    Agrega la columna TASA al DataFrame de ordenes usando un VLOOKUP basado en FECHA_ORDEN y DIVISA.
+    Busca la tasa correspondiente según la divisa (VES/USD, COP/USD, EUR/USD).
+    Si no encuentra la fecha exacta, usa la del día anterior o la fila anterior.
     
     Args:
         df_ordenes: DataFrame de Ordenes de Compra
@@ -279,79 +281,131 @@ def agregar_columna_tasa(df_ordenes: pd.DataFrame, df_tasa: pd.DataFrame) -> pd.
     print("Agregando columna TASA...")
     
     # Buscar la columna de fecha en el DataFrame de tasa
-    # Puede llamarse FECHA, DATE, FECHA_CAMBIO, etc.
     columna_fecha_tasa = None
-    columna_tasa_valor = None
-    
-    # Buscar columnas que puedan contener la fecha
     posibles_fechas = ['FECHA', 'DATE', 'FECHA_CAMBIO', 'FECHA_TASA']
     for col in df_tasa.columns:
         if any(pf in col.upper() for pf in posibles_fechas):
             columna_fecha_tasa = col
             break
     
-    # Buscar columna que contenga VES/USD o el valor de tasa
-    posibles_tasas = ['VES/USD', 'VES_USD', 'TASA', 'CAMBIO', 'RATE']
-    for col in df_tasa.columns:
-        col_upper = col.upper()
-        if any(pt in col_upper for pt in posibles_tasas):
-            columna_tasa_valor = col
-            break
-    
     if not columna_fecha_tasa:
-        # Si no encontramos, usar la primera columna como fecha
         columna_fecha_tasa = df_tasa.columns[0]
         print(f"⚠ No se encontró columna de fecha explícita, usando: {columna_fecha_tasa}")
     
-    if not columna_tasa_valor:
-        # Si no encontramos, usar la segunda columna como tasa
-        if len(df_tasa.columns) > 1:
-            columna_tasa_valor = df_tasa.columns[1]
-        else:
-            columna_tasa_valor = df_tasa.columns[0]
-        print(f"⚠ No se encontró columna de tasa explícita, usando: {columna_tasa_valor}")
+    # Buscar columnas de tasa según divisa
+    columnas_tasa = {}
+    tasas_buscadas = {
+        'VES': ['VES/USD', 'VES_USD'],
+        'COP': ['COP/USD', 'COP_USD'],
+        'EUR': ['EUR/USD', 'EUR_USD']
+    }
+    
+    for divisa, patrones in tasas_buscadas.items():
+        for col in df_tasa.columns:
+            col_upper = col.upper()
+            if any(patron.upper() in col_upper for patron in patrones):
+                columnas_tasa[divisa] = col
+                print(f"  Columna de tasa {divisa} encontrada: {col}")
+                break
+    
+    if not columnas_tasa:
+        # Fallback: buscar cualquier columna que contenga "USD" o "TASA"
+        for col in df_tasa.columns:
+            col_upper = col.upper()
+            if 'USD' in col_upper or 'TASA' in col_upper or 'CAMBIO' in col_upper:
+                columnas_tasa['DEFAULT'] = col
+                print(f"⚠ Usando columna de tasa por defecto: {col}")
+                break
     
     print(f"  Columna fecha en tasa: {columna_fecha_tasa}")
-    print(f"  Columna valor tasa: {columna_tasa_valor}")
     
-    # Crear un diccionario de fecha -> tasa para hacer el lookup
-    # Convertir fechas a formato datetime si es necesario
-    df_tasa_clean = df_tasa[[columna_fecha_tasa, columna_tasa_valor]].copy()
-    df_tasa_clean = df_tasa_clean.dropna()
+    # Preparar DataFrame de tasas ordenado por fecha
+    df_tasa_clean = df_tasa.copy()
+    df_tasa_clean[columna_fecha_tasa] = pd.to_datetime(df_tasa_clean[columna_fecha_tasa], errors='coerce')
+    df_tasa_clean = df_tasa_clean.sort_values(by=columna_fecha_tasa)
+    df_tasa_clean = df_tasa_clean.dropna(subset=[columna_fecha_tasa])
     
-    # Convertir fechas a datetime
-    try:
-        df_tasa_clean[columna_fecha_tasa] = pd.to_datetime(df_tasa_clean[columna_fecha_tasa])
-    except:
-        print(f"⚠ No se pudo convertir {columna_fecha_tasa} a fecha, intentando formato manual")
-    
-    # Crear diccionario de lookup
-    tasa_dict = {}
+    # Crear DataFrame de lookup con todas las tasas
+    tasas_lookup = []
     for _, row in df_tasa_clean.iterrows():
         fecha = row[columna_fecha_tasa]
-        tasa = row[columna_tasa_valor]
-        # Convertir fecha a string para comparación
-        if isinstance(fecha, pd.Timestamp):
-            fecha_str = fecha.strftime('%Y-%m-%d')
-            tasa_dict[fecha_str] = tasa
-        else:
-            tasa_dict[str(fecha)] = tasa
+        if pd.isna(fecha):
+            continue
+        
+        fecha_str = fecha.strftime('%Y-%m-%d') if isinstance(fecha, pd.Timestamp) else str(fecha)
+        tasas_row = {'fecha': fecha, 'fecha_str': fecha_str}
+        
+        # Agregar cada tipo de tasa
+        for divisa, col_tasa in columnas_tasa.items():
+            if col_tasa in row.index:
+                tasas_row[f'tasa_{divisa}'] = row[col_tasa]
+        
+        tasas_lookup.append(tasas_row)
+    
+    # Crear DataFrame de lookup para búsqueda eficiente
+    df_lookup = pd.DataFrame(tasas_lookup)
+    
+    # Función para buscar tasa con fallback a fecha anterior
+    def buscar_tasa_con_fallback(fecha_orden, divisa):
+        if pd.isna(fecha_orden):
+            return None
+        
+        try:
+            fecha_dt = pd.to_datetime(fecha_orden)
+            fecha_str = fecha_dt.strftime('%Y-%m-%d')
+            
+            # Normalizar divisa
+            divisa_upper = str(divisa).upper().strip() if not pd.isna(divisa) else ""
+            
+            # Determinar qué columna de tasa usar
+            col_tasa_key = None
+            if divisa_upper == 'VES':
+                col_tasa_key = 'tasa_VES'
+            elif divisa_upper == 'COP':
+                col_tasa_key = 'tasa_COP'
+            elif divisa_upper == 'EUR':
+                col_tasa_key = 'tasa_EUR'
+            else:
+                # Para USD o cualquier otra, no necesita conversión (retornar 1 o None)
+                return None
+            
+            # Buscar fecha exacta
+            fila_exacta = df_lookup[df_lookup['fecha_str'] == fecha_str]
+            if not fila_exacta.empty and col_tasa_key in fila_exacta.columns:
+                tasa = fila_exacta.iloc[0][col_tasa_key]
+                if not pd.isna(tasa):
+                    return tasa
+            
+            # Si no se encuentra, buscar la fecha anterior más cercana
+            filas_anteriores = df_lookup[df_lookup['fecha'] <= fecha_dt]
+            if not filas_anteriores.empty:
+                # Tomar la última fila (más cercana a la fecha buscada)
+                fila_anterior = filas_anteriores.iloc[-1]
+                if col_tasa_key in fila_anterior.index:
+                    tasa = fila_anterior[col_tasa_key]
+                    if not pd.isna(tasa):
+                        print(f"  ⚠ Tasa no encontrada para fecha {fecha_str}, usando fecha anterior: {fila_anterior['fecha_str']}")
+                        return tasa
+            
+            return None
+        except Exception as e:
+            print(f"⚠ Error al buscar tasa para fecha {fecha_orden}, divisa {divisa}: {e}")
+            return None
     
     # Agregar columna TASA al DataFrame de ordenes
     df_ordenes_con_tasa = df_ordenes.copy()
     
-    # Convertir FECHA_ORDEN a formato comparable
-    def buscar_tasa(fecha_orden):
-        if pd.isna(fecha_orden):
-            return None
-        try:
-            fecha_dt = pd.to_datetime(fecha_orden)
-            fecha_str = fecha_dt.strftime('%Y-%m-%d')
-            return tasa_dict.get(fecha_str)
-        except:
-            return None
+    # Asegurar que existe la columna DIVISA
+    if 'DIVISA' not in df_ordenes_con_tasa.columns:
+        print("⚠ Advertencia: No existe columna DIVISA, no se puede determinar la tasa correcta")
+        df_ordenes_con_tasa['TASA'] = None
+        return df_ordenes_con_tasa
     
-    df_ordenes_con_tasa['TASA'] = df_ordenes_con_tasa['FECHA_ORDEN'].apply(buscar_tasa)
+    # Aplicar búsqueda de tasa
+    df_ordenes_con_tasa['TASA'] = df_ordenes_con_tasa.apply(
+        lambda row: buscar_tasa_con_fallback(row['FECHA_ORDEN'], row['DIVISA']), 
+        axis=1
+    )
     
     # Contar cuántas tasas se encontraron
     tasas_encontradas = df_ordenes_con_tasa['TASA'].notna().sum()
@@ -487,8 +541,11 @@ def agregar_montos_oc(df: pd.DataFrame) -> pd.DataFrame:
     Lógica:
     - MONTO OC = PRICE_OVERRIDE * IMPORTE
     - MONTO OC USD = 
-      * Si DIVISA == "USD": MONTO OC / TASA
-      * Si DIVISA != "USD": MONTO OC (igual)
+      * Si DIVISA == "USD": MONTO OC (ya está en USD, no se divide)
+      * Si DIVISA == "VES": MONTO OC / TASA (VES/USD)
+      * Si DIVISA == "COP": MONTO OC / TASA (COP/USD)
+      * Si DIVISA == "EUR": MONTO OC / TASA (EUR/USD)
+      * Todo lo que no sea USD se convierte a USD dividiendo por la tasa correspondiente
     
     Args:
         df: DataFrame de Ordenes de Compra (debe tener TASA ya agregada)
@@ -545,22 +602,32 @@ def agregar_montos_oc(df: pd.DataFrame) -> pd.DataFrame:
             # Convertir divisa a string y normalizar
             divisa_str = str(divisa).upper().strip() if not pd.isna(divisa) else ""
             
-            # Si la divisa es USD, dividir por la tasa
+            # Si la divisa es USD, no necesita conversión (ya está en USD)
             if divisa_str == 'USD':
+                return monto_oc
+            
+            # Si no es USD (VES, COP, EUR), convertir a USD dividiendo por la tasa
+            if divisa_str in ['VES', 'COP', 'EUR']:
                 if pd.isna(tasa) or tasa == 0:
-                    print(f"⚠ Tasa nula o cero para divisa USD, usando MONTO OC original")
-                    return monto_oc
+                    print(f"⚠ Tasa nula o cero para divisa {divisa_str}, no se puede convertir a USD")
+                    return None
                 
                 # Convertir tasa a numérico
                 tasa_num = pd.to_numeric(tasa, errors='coerce')
                 if pd.isna(tasa_num) or tasa_num == 0:
-                    print(f"⚠ Tasa inválida para divisa USD, usando MONTO OC original")
-                    return monto_oc
+                    print(f"⚠ Tasa inválida para divisa {divisa_str}, no se puede convertir a USD")
+                    return None
                 
                 return monto_oc / tasa_num
             else:
-                # Si no es USD, usar el mismo valor de MONTO OC
-                return monto_oc
+                # Para otras divisas no reconocidas, intentar usar la tasa si existe
+                if not pd.isna(tasa) and tasa != 0:
+                    tasa_num = pd.to_numeric(tasa, errors='coerce')
+                    if not pd.isna(tasa_num) and tasa_num != 0:
+                        return monto_oc / tasa_num
+                
+                print(f"⚠ Divisa {divisa_str} no reconocida y sin tasa, no se puede convertir a USD")
+                return None
         except Exception as e:
             print(f"⚠ Error al calcular MONTO OC USD: {e}")
             return None
@@ -585,8 +652,11 @@ def agregar_montos_oc_asociado(df: pd.DataFrame) -> pd.DataFrame:
     Lógica:
     - MONTO OC ASOCIADO = IMPORTE_ASOCIADO * PRICE_OVERRIDE
     - MONTO OC ASOCIADO USD = 
-      * Si DIVISA == "USD": MONTO OC ASOCIADO / TASA
-      * Si DIVISA != "USD": MONTO OC ASOCIADO (igual)
+      * Si DIVISA == "USD": MONTO OC ASOCIADO (ya está en USD, no se divide)
+      * Si DIVISA == "VES": MONTO OC ASOCIADO / TASA (VES/USD)
+      * Si DIVISA == "COP": MONTO OC ASOCIADO / TASA (COP/USD)
+      * Si DIVISA == "EUR": MONTO OC ASOCIADO / TASA (EUR/USD)
+      * Todo lo que no sea USD se convierte a USD dividiendo por la tasa correspondiente
     
     Args:
         df: DataFrame de Ordenes de Compra (debe tener TASA ya agregada)
@@ -643,22 +713,32 @@ def agregar_montos_oc_asociado(df: pd.DataFrame) -> pd.DataFrame:
             # Convertir divisa a string y normalizar
             divisa_str = str(divisa).upper().strip() if not pd.isna(divisa) else ""
             
-            # Si la divisa es USD, dividir por la tasa
+            # Si la divisa es USD, no necesita conversión (ya está en USD)
             if divisa_str == 'USD':
+                return monto_oc_asociado
+            
+            # Si no es USD (VES, COP, EUR), convertir a USD dividiendo por la tasa
+            if divisa_str in ['VES', 'COP', 'EUR']:
                 if pd.isna(tasa) or tasa == 0:
-                    print(f"⚠ Tasa nula o cero para divisa USD, usando MONTO OC ASOCIADO original")
-                    return monto_oc_asociado
+                    print(f"⚠ Tasa nula o cero para divisa {divisa_str}, no se puede convertir a USD")
+                    return None
                 
                 # Convertir tasa a numérico
                 tasa_num = pd.to_numeric(tasa, errors='coerce')
                 if pd.isna(tasa_num) or tasa_num == 0:
-                    print(f"⚠ Tasa inválida para divisa USD, usando MONTO OC ASOCIADO original")
-                    return monto_oc_asociado
+                    print(f"⚠ Tasa inválida para divisa {divisa_str}, no se puede convertir a USD")
+                    return None
                 
                 return monto_oc_asociado / tasa_num
             else:
-                # Si no es USD, usar el mismo valor de MONTO OC ASOCIADO
-                return monto_oc_asociado
+                # Para otras divisas no reconocidas, intentar usar la tasa si existe
+                if not pd.isna(tasa) and tasa != 0:
+                    tasa_num = pd.to_numeric(tasa, errors='coerce')
+                    if not pd.isna(tasa_num) and tasa_num != 0:
+                        return monto_oc_asociado / tasa_num
+                
+                print(f"⚠ Divisa {divisa_str} no reconocida y sin tasa, no se puede convertir a USD")
+                return None
         except Exception as e:
             print(f"⚠ Error al calcular MONTO OC ASOCIADO USD: {e}")
             return None
