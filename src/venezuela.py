@@ -366,8 +366,19 @@ def agregar_columna_tasa(df_ordenes: pd.DataFrame, df_tasa: pd.DataFrame) -> pd.
             elif divisa_upper == 'EUR':
                 col_tasa_key = 'tasa_EUR'
             else:
-                # Para USD o cualquier otra, no necesita conversión (retornar 1 o None)
-                return None
+                # Para USD o cualquier otra divisa, usar la primera tasa disponible como referencia
+                # Prioridad: VES/USD > COP/USD > EUR/USD > DEFAULT
+                if 'tasa_VES' in df_lookup.columns:
+                    col_tasa_key = 'tasa_VES'
+                elif 'tasa_COP' in df_lookup.columns:
+                    col_tasa_key = 'tasa_COP'
+                elif 'tasa_EUR' in df_lookup.columns:
+                    col_tasa_key = 'tasa_EUR'
+                elif 'tasa_DEFAULT' in df_lookup.columns:
+                    col_tasa_key = 'tasa_DEFAULT'
+                else:
+                    # Si no hay ninguna tasa disponible, retornar None
+                    return None
             
             # Buscar fecha exacta
             fila_exacta = df_lookup[df_lookup['fecha_str'] == fecha_str]
