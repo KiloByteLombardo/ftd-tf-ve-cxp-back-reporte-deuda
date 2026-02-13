@@ -33,5 +33,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Comando para ejecutar la aplicación con gunicorn
 # --access-logfile - y --error-logfile - para mostrar logs en stdout/stderr
 # --log-level info para mostrar información de requests
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "--log-level", "info", "src.api:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "300", "--access-logfile", "-", "--error-logfile", "-", "--log-level", "info", "src.api:app"]
 

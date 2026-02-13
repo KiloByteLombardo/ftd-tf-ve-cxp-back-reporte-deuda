@@ -265,6 +265,72 @@ def leer_tasa(ruta_archivo: str) -> pd.DataFrame:
     return df
 
 
+def leer_tasa_desde_bigquery(project_id: str, dataset_id: str = 'cxp_vzla', table_id: str = 'bcv_tasas') -> pd.DataFrame:
+    """
+    Lee las tasas de cambio desde una tabla en BigQuery en lugar de un archivo Excel.
+    Retorna un DataFrame con el mismo formato que leer_tasa() para compatibilidad
+    con agregar_columna_tasa().
+    
+    La tabla en BigQuery tiene el esquema:
+        - Date (DATE): Fecha de la tasa
+        - USD (FLOAT): Tasa VES/USD
+        - EUR (FLOAT): Tasa VES/EUR
+    
+    Args:
+        project_id: ID del proyecto de GCP
+        dataset_id: ID del dataset de BigQuery (default: 'cxp_vzla')
+        table_id: ID de la tabla de BigQuery (default: 'bcv_tasas')
+        
+    Returns:
+        DataFrame con columnas FECHA, VES/USD, VES/EUR (mismo formato que leer_tasa)
+    """
+    print(f"Leyendo tasas desde BigQuery: {project_id}.{dataset_id}.{table_id}")
+    
+    try:
+        from google.cloud import bigquery
+        
+        client = bigquery.Client(project=project_id)
+        query = f"SELECT Date, USD, EUR FROM `{project_id}.{dataset_id}.{table_id}` ORDER BY Date"
+        
+        print(f"  Ejecutando query: {query}")
+        df = client.query(query).to_dataframe()
+        
+        if df.empty:
+            print("⚠ Advertencia: La tabla de tasas en BigQuery está vacía")
+            return df
+        
+        # Renombrar columnas para compatibilidad con agregar_columna_tasa()
+        df = df.rename(columns={
+            'Date': 'FECHA',
+            'USD': 'VES/USD',
+            'EUR': 'VES/EUR'
+        })
+        
+        # Asegurar que FECHA sea datetime
+        df['FECHA'] = pd.to_datetime(df['FECHA'], errors='coerce')
+        
+        # Eliminar filas con fecha nula
+        filas_antes = len(df)
+        df = df.dropna(subset=['FECHA'])
+        filas_despues = len(df)
+        if filas_antes != filas_despues:
+            print(f"  Filas con fecha nula eliminadas: {filas_antes - filas_despues}")
+        
+        # Normalizar nombres de columnas a mayúsculas (por consistencia)
+        df.columns = df.columns.str.upper().str.strip()
+        
+        print(f"✓ Tasas leídas desde BigQuery. Filas: {len(df)}, Columnas: {list(df.columns)}")
+        print(f"  Rango de fechas: {df['FECHA'].min()} a {df['FECHA'].max()}")
+        
+        return df
+        
+    except Exception as e:
+        print(f"✗ Error al leer tasas desde BigQuery: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
 def agregar_columna_tasa(df_ordenes: pd.DataFrame, df_tasa: pd.DataFrame) -> pd.DataFrame:
     """
     Agrega la columna TASA al DataFrame de ordenes usando un VLOOKUP basado en FECHA_ORDEN y DIVISA.
@@ -994,6 +1060,8 @@ def subir_a_bigquery(df: pd.DataFrame, project_id: str, dataset_id: str, table_i
 def subir_excel_a_cloud_storage(ruta_archivo: str, bucket_name: str, nombre_archivo: Optional[str] = None) -> Optional[str]:
     """
     Sube el archivo Excel a Cloud Storage y retorna la URL pública.
+    El archivo se guarda en la ruta: vzla/{timestamp_caracas}/{nombre_archivo}
+    donde el timestamp usa la zona horaria de Caracas, Venezuela (America/Caracas).
     
     Args:
         ruta_archivo: Ruta local al archivo Excel
@@ -1007,6 +1075,7 @@ def subir_excel_a_cloud_storage(ruta_archivo: str, bucket_name: str, nombre_arch
     
     try:
         from google.cloud import storage
+        from zoneinfo import ZoneInfo
         
         client = storage.Client()
         bucket = client.bucket(bucket_name)
@@ -1015,11 +1084,20 @@ def subir_excel_a_cloud_storage(ruta_archivo: str, bucket_name: str, nombre_arch
         if not nombre_archivo:
             nombre_archivo = os.path.basename(ruta_archivo)
         
+        # Generar timestamp con zona horaria de Caracas (America/Caracas, UTC-4)
+        tz_caracas = ZoneInfo('America/Caracas')
+        timestamp_caracas = datetime.now(tz_caracas)
+        carpeta_timestamp = timestamp_caracas.strftime('%Y-%m-%d_%H-%M-%S')
+        
+        # Construir ruta: vzla/{timestamp_caracas}/{nombre_archivo}
+        ruta_blob = f"vzla/{carpeta_timestamp}/{nombre_archivo}"
+        
         # Subir el archivo
-        blob = bucket.blob(nombre_archivo)
+        blob = bucket.blob(ruta_blob)
         blob.upload_from_filename(ruta_archivo)
         
-        print(f"  Archivo subido como: {nombre_archivo}")
+        print(f"  Archivo subido como: {ruta_blob}")
+        print(f"  Timestamp Caracas: {timestamp_caracas.strftime('%Y-%m-%d %H:%M:%S %Z')}")
         
         # Hacer el archivo público y obtener la URL
         try:
@@ -1033,13 +1111,13 @@ def subir_excel_a_cloud_storage(ruta_archivo: str, bucket_name: str, nombre_arch
         # Verificar que la URL se generó correctamente
         if not url_publica or url_publica == '' or url_publica is None:
             # Si public_url no funciona, construir la URL manualmente
-            url_publica = f"https://storage.googleapis.com/{bucket_name}/{nombre_archivo}"
+            url_publica = f"https://storage.googleapis.com/{bucket_name}/{ruta_blob}"
             print(f"  URL construida manualmente: {url_publica}")
         
         print(f"✓ Archivo subido a Cloud Storage exitosamente")
         print(f"  URL pública final: {url_publica}")
         print(f"  Bucket: {bucket_name}")
-        print(f"  Blob: {nombre_archivo}")
+        print(f"  Blob: {ruta_blob}")
         
         return url_publica
         
@@ -1295,6 +1373,83 @@ def procesar_archivos(
             df_ordenes_final.to_excel(writer, sheet_name='Ordenes de Compra', index=False)
             
             # Hoja 2: Tasas
+            df_tasa.to_excel(writer, sheet_name='Tasa', index=False)
+        
+        # Aplicar estilos al archivo
+        aplicar_estilos_excel(ruta_salida)
+        print("✓ Archivo guardado exitosamente")
+    
+    return df_ordenes_final, df_tasa
+
+
+def procesar_archivos_con_bigquery(
+    ruta_ordenes: str,
+    ruta_salida: Optional[str] = None,
+    project_id: Optional[str] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Procesa el archivo de Ordenes de Compra usando las tasas de cambio
+    leídas directamente desde BigQuery (tabla cxp_vzla.bcv_tasas)
+    en lugar de un archivo Excel de tasas.
+    
+    Args:
+        ruta_ordenes: Ruta al archivo de Ordenes de Compra
+        ruta_salida: Ruta opcional para guardar el resultado
+        project_id: ID del proyecto de GCP (opcional, se lee de variable de entorno si no se proporciona)
+        
+    Returns:
+        Tupla con (DataFrame de ordenes procesadas, DataFrame de tasa)
+    """
+    # Obtener project_id si no se proporcionó
+    if not project_id:
+        project_id = os.getenv('GCP_PROJECT_ID')
+    
+    if not project_id:
+        raise ValueError("GCP_PROJECT_ID no está configurado. Se requiere para leer tasas desde BigQuery.")
+    
+    # Leer archivo de ordenes
+    df_ordenes = leer_ordenes_compra(ruta_ordenes)
+    
+    # Leer tasas desde BigQuery
+    df_tasa = leer_tasa_desde_bigquery(project_id)
+    
+    # Filtrar filas con ESTADO_CIERRE == "CERRADO"
+    df_ordenes_filtrado = filtrar_cerrados(df_ordenes)
+    
+    # Agregar columna AÑO FISCAL
+    df_ordenes_con_ano_fiscal = agregar_ano_fiscal(df_ordenes_filtrado)
+    
+    # Agregar columna TASA usando VLOOKUP por fecha
+    df_ordenes_con_tasa = agregar_columna_tasa(df_ordenes_con_ano_fiscal, df_tasa)
+    
+    # Agregar columna AREA desde Google Sheets
+    credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+    spreadsheet_id = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
+    df_ordenes_con_area = agregar_columna_area(
+        df_ordenes_con_tasa, 
+        spreadsheet_id, 
+        credentials_path if credentials_path and os.path.exists(credentials_path) else None
+    )
+    
+    # Agregar columnas MONTO OC y MONTO OC USD
+    df_ordenes_con_montos = agregar_montos_oc(df_ordenes_con_area)
+    
+    # Agregar columnas MONTO OC ASOCIADO y MONTO OC ASOCIADO USD
+    df_ordenes_con_montos_asociado = agregar_montos_oc_asociado(df_ordenes_con_montos)
+    
+    # Agregar columna MONTO REAL DEUDA
+    df_ordenes_final = agregar_monto_real_deuda(df_ordenes_con_montos_asociado)
+    
+    # Guardar resultado si se especifica ruta de salida
+    if ruta_salida:
+        print(f"Guardando resultado en: {ruta_salida}")
+        
+        # Crear ExcelWriter para múltiples hojas
+        with pd.ExcelWriter(ruta_salida, engine='openpyxl') as writer:
+            # Hoja 1: Ordenes de Compra procesadas
+            df_ordenes_final.to_excel(writer, sheet_name='Ordenes de Compra', index=False)
+            
+            # Hoja 2: Tasas (desde BigQuery)
             df_tasa.to_excel(writer, sheet_name='Tasa', index=False)
         
         # Aplicar estilos al archivo

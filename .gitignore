@@ -218,3 +218,5 @@ deploy.ps1
 deploy.sh
 deploy.bat
 deploy.sh
+
+sse_frontend_guide.md
